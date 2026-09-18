@@ -10,6 +10,8 @@ The bar shows the Servings mark with the light in its corner: green while
 everything is up, red the moment one thing is not, so you know before you
 open anything.
 
+![the panel](docs/panel.png)
+
 ## Install
 
 ```bash
