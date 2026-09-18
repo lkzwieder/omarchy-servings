@@ -1,0 +1,76 @@
+{
+  "schemaVersion": 1,
+  "id": "lkzwieder.servings",
+  "name": "Servings",
+  "version": "1.0.0",
+  "author": "lkzwieder",
+  "license": "MIT",
+  "description": "Everything you serve on your own machines, in one Omarchy bar panel: name, address and a light that is green when it answers and red when it does not.",
+  "kinds": [
+    "bar-widget"
+  ],
+  "activation": "on-demand",
+  "entryPoints": {
+    "barWidget": "ServingsPanel.qml"
+  },
+  "barWidget": {
+    "displayName": "Servings",
+    "description": "Dev servers, self-hosted models, MCP servers, databases: one row each with a green or red light, grouped the way you group them.",
+    "category": "Developer Tools",
+    "aliases": [
+      "servings",
+      "services",
+      "uptime"
+    ],
+    "allowMultiple": false,
+    "defaultSection": "right",
+    "defaults": {
+      "refreshIntervalSec": 30,
+      "timeoutMs": 1500,
+      "configPath": "",
+      "upColor": "#7fb069",
+      "downColor": ""
+    },
+    "schema": [
+      {
+        "key": "refreshIntervalSec",
+        "type": "integer",
+        "label": "Refresh interval (seconds)",
+        "min": 5,
+        "max": 3600,
+        "step": 5,
+        "defaultValue": 30
+      },
+      {
+        "key": "timeoutMs",
+        "type": "integer",
+        "label": "Per-service timeout (ms)",
+        "min": 100,
+        "max": 10000,
+        "step": 100,
+        "defaultValue": 1500
+      },
+      {
+        "key": "configPath",
+        "type": "path",
+        "label": "Services file",
+        "defaultValue": "",
+        "description": "Defaults to ~/.config/omarchy/servings.json."
+      },
+      {
+        "key": "upColor",
+        "type": "string",
+        "label": "Up light",
+        "defaultValue": "#7fb069",
+        "description": "Color of the light when a service answers."
+      },
+      {
+        "key": "downColor",
+        "type": "string",
+        "label": "Down light",
+        "defaultValue": "",
+        "description": "Color of the light when a service is down. Empty uses the theme's urgent color."
+      }
+    ]
+  }
+}

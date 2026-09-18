@@ -1,0 +1,33 @@
+{
+  "timeoutMs": 1500,
+  "groups": [
+    {
+      "name": "Projects",
+      "services": [
+        { "name": "My API", "address": "127.0.0.1:8001", "path": "/health", "open": "http://127.0.0.1:8001/docs" },
+        { "name": "My Web", "address": "127.0.0.1:5173", "path": "/" }
+      ]
+    },
+    {
+      "name": "Models",
+      "services": [
+        { "name": "LiteLLM gateway", "address": "127.0.0.1:4000", "path": "/health/readiness" },
+        { "name": "llama-server · box-1", "address": "192.168.1.10:8002", "path": "/health", "detail": "Qwen3.6 35B-A3B" }
+      ]
+    },
+    {
+      "name": "MCP",
+      "services": [
+        { "name": "knowledge base", "address": "127.0.0.1:8180", "path": "/mcp", "expect": "any", "open": "" }
+      ]
+    },
+    {
+      "name": "Infra",
+      "services": [
+        { "name": "Postgres", "address": "127.0.0.1:5432", "check": "tcp" },
+        { "name": "Redis", "address": "127.0.0.1:6379", "check": "tcp" },
+        { "name": "Docker", "unit": "docker.service", "scope": "system", "address": "local" }
+      ]
+    }
+  ]
+}

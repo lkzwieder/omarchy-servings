@@ -1,0 +1,238 @@
+#!/usr/bin/env python3
+"""Probe every service in a Servings config and print one JSON report.
+
+The panel never learns how a service was checked; it draws whatever this
+prints. Rows come back in config order, grouped the way the config groups
+them, each with `up`, `latencyMs` and, when something went wrong, `error`.
+
+Checks:
+  http     GET url (or http://address + path); up when the status matches
+           `expect` ("2xx" by default, "any" for endpoints that answer 4xx
+           to a bare GET, or a list of codes).
+  tcp      a TCP connect to address.
+  systemd  `systemctl --user is-active unit` (or system scope with
+           "scope": "system").
+"""
+
+import argparse
+import concurrent.futures
+import http.client
+import json
+import os
+import socket
+import subprocess
+import sys
+import time
+import urllib.error
+import urllib.request
+
+DEFAULT_TIMEOUT_MS = 1500
+
+
+def load_config(path):
+    with open(path, "r", encoding="utf-8") as fh:
+        return json.load(fh)
+
+
+def split_address(address):
+    address = str(address or "").strip()
+    if address.startswith("[") and "]:" in address:
+        host, port = address[1:].split("]:", 1)
+        return host, int(port)
+    if address.count(":") == 1:
+        host, port = address.rsplit(":", 1)
+        return host, int(port)
+    raise ValueError("address must be host:port, got %r" % address)
+
+
+def status_matches(code, expect):
+    if expect in (None, "", "2xx"):
+        return 200 <= code < 300
+    if expect == "any":
+        return True
+    if isinstance(expect, str) and expect.endswith("xx") and len(expect) == 3:
+        base = int(expect[0]) * 100
+        return base <= code < base + 100
+    if isinstance(expect, (list, tuple)):
+        return code in [int(c) for c in expect]
+    return code == int(expect)
+
+
+def check_http(service, timeout_s):
+    url = service.get("url")
+    if not url:
+        scheme = service.get("scheme", "http")
+        url = "%s://%s%s" % (scheme, service["address"], service.get("path", "/"))
+    request = urllib.request.Request(url, method=service.get("method", "GET"))
+    request.add_header("User-Agent", "servings-probe/1.0")
+    for key, value in (service.get("headers") or {}).items():
+        request.add_header(str(key), str(value))
+    expect = service.get("expect")
+    try:
+        with urllib.request.urlopen(request, timeout=timeout_s) as response:
+            code = response.status
+    except urllib.error.HTTPError as exc:
+        code = exc.code
+    except urllib.error.URLError as exc:
+        reason = getattr(exc, "reason", exc)
+        # The socket opened and the peer hung up on a bare GET: an MCP server
+        # that only speaks POST/SSE does this. When any status would have
+        # counted, a peer that answered at all counts too.
+        if expect == "any" and isinstance(reason, (http.client.RemoteDisconnected, http.client.BadStatusLine)):
+            return True, "connected"
+        return False, "no connection: %s" % (reason,)
+    except (http.client.RemoteDisconnected, http.client.BadStatusLine):
+        if expect == "any":
+            return True, "connected"
+        return False, "connection closed without a response"
+    except (socket.timeout, TimeoutError):
+        return False, "timeout"
+    except Exception as exc:  # noqa: BLE001 - one bad row must not kill the report
+        return False, str(exc)
+    if status_matches(code, expect):
+        return True, "HTTP %d" % code
+    return False, "HTTP %d" % code
+
+
+def check_tcp(service, timeout_s):
+    try:
+        host, port = split_address(service["address"])
+        with socket.create_connection((host, port), timeout=timeout_s):
+            return True, "port open"
+    except (socket.timeout, TimeoutError):
+        return False, "timeout"
+    except OSError as exc:
+        return False, "no connection: %s" % (exc.strerror or exc,)
+    except Exception as exc:  # noqa: BLE001
+        return False, str(exc)
+
+
+def check_systemd(service, timeout_s):
+    unit = service.get("unit")
+    if not unit:
+        return False, "systemd check needs a unit"
+    command = ["systemctl"]
+    if service.get("scope", "user") != "system":
+        command.append("--user")
+    command += ["is-active", unit]
+    try:
+        result = subprocess.run(command, capture_output=True, text=True, timeout=timeout_s)
+    except subprocess.TimeoutExpired:
+        return False, "timeout"
+    state = (result.stdout or result.stderr or "").strip() or "unknown"
+    return result.returncode == 0, state
+
+
+CHECKS = {"http": check_http, "tcp": check_tcp, "systemd": check_systemd}
+
+
+def default_check(service):
+    if service.get("check"):
+        return str(service["check"])
+    if service.get("unit"):
+        return "systemd"
+    if service.get("url") or service.get("path") or service.get("expect"):
+        return "http"
+    return "tcp"
+
+
+def default_open(service, check):
+    if service.get("open") is not None:
+        return str(service.get("open") or "")
+    if check == "http":
+        return service.get("url") or "http://%s/" % service["address"]
+    return ""
+
+
+def probe(service, default_timeout_ms):
+    check = default_check(service)
+    timeout_s = max(50, int(service.get("timeoutMs", default_timeout_ms))) / 1000.0
+    started = time.monotonic()
+    fn = CHECKS.get(check)
+    if fn is None:
+        up, detail = False, "unknown check %r" % check
+    else:
+        try:
+            up, detail = fn(service, timeout_s)
+        except Exception as exc:  # noqa: BLE001
+            up, detail = False, str(exc)
+    latency_ms = int(round((time.monotonic() - started) * 1000))
+    row = {
+        "name": str(service.get("name") or service.get("address") or "?"),
+        "address": str(service.get("address") or ""),
+        "detail": str(service.get("detail") or ""),
+        "check": check,
+        "up": bool(up),
+        "latencyMs": latency_ms,
+        "open": default_open(service, check),
+    }
+    if up:
+        row["status"] = detail
+    else:
+        row["error"] = detail
+    return row
+
+
+def flatten(config):
+    """Yield (group name, service) in config order.
+
+    Accepts either {"groups": [{"name", "services": [...]}]} or a flat
+    {"services": [...]} whose rows may carry a "group" field.
+    """
+    if isinstance(config, dict) and isinstance(config.get("groups"), list):
+        for group in config["groups"]:
+            name = str(group.get("name") or "Services")
+            for service in group.get("services") or []:
+                yield name, service
+        return
+    services = config.get("services") if isinstance(config, dict) else config
+    for service in services or []:
+        yield str(service.get("group") or "Services"), service
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser.add_argument("--config", required=True, help="path to the services JSON")
+    parser.add_argument("--timeout-ms", type=int, default=DEFAULT_TIMEOUT_MS, help="per-service timeout")
+    parser.add_argument("--workers", type=int, default=16)
+    parser.add_argument("--pretty", action="store_true")
+    args = parser.parse_args()
+
+    report = {"generatedAt": time.strftime("%Y-%m-%dT%H:%M:%S%z"), "configPath": args.config, "groups": [], "up": 0, "down": 0}
+
+    if not os.path.exists(args.config):
+        report["error"] = "config-missing"
+        print(json.dumps(report))
+        return 0
+    try:
+        config = load_config(args.config)
+    except Exception as exc:  # noqa: BLE001
+        report["error"] = "config-invalid"
+        report["errorDetail"] = str(exc)
+        print(json.dumps(report))
+        return 0
+
+    entries = list(flatten(config))
+    timeout_ms = int(config.get("timeoutMs", args.timeout_ms)) if isinstance(config, dict) else args.timeout_ms
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=max(1, args.workers)) as pool:
+        rows = list(pool.map(lambda entry: (entry[0], probe(entry[1], timeout_ms)), entries))
+
+    groups = []
+    by_name = {}
+    for group_name, row in rows:
+        if group_name not in by_name:
+            by_name[group_name] = {"name": group_name, "services": [], "up": 0, "down": 0}
+            groups.append(by_name[group_name])
+        group = by_name[group_name]
+        group["services"].append(row)
+        group["up" if row["up"] else "down"] += 1
+        report["up" if row["up"] else "down"] += 1
+    report["groups"] = groups
+
+    print(json.dumps(report, indent=2 if args.pretty else None, ensure_ascii=False))
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
